@@ -1,0 +1,9 @@
+*.pyc
+*.un~
+*~
+.*.un~
+venv/
+__pycache__/
+*.pyc
+scheduler_old.py
+.env
