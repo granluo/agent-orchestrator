@@ -7,3 +7,7 @@ __pycache__/
 *.pyc
 scheduler_old.py
 .env
+
+# Vim
+*.swp
+*.swo
