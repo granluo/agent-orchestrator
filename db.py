@@ -37,8 +37,8 @@ def get_status(task_id: int) -> str | None:
             cur.execute("SELECT status from tasks WHERE task_id=%s",
                         (task_id,)
                         )
-            row = cur.fetchone();
-            if  row is not None:
+            row = cur.fetchone()
+            if row is not None:
                 return row[0]
             return None
     finally:

@@ -8,7 +8,8 @@ CREATE TABLE tasks (
     last_error      TEXT,
     lease_expires_at TIMESTAMPTZ,             -- Day 3 用
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    delivery_count INT NOT NULL DEFAULT 0
 );
 
 -- 索引:scheduler 要快速找 PENDING 任务
