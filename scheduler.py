@@ -1,6 +1,7 @@
 import db, time, json, random, threading
 
 MAX_RETRY=3
+MAX_DELIVERY=3
 
 # get task
 
@@ -8,22 +9,28 @@ def claim_one_task():
 
     conn = db.get_conn()
     try:
-        with conn, conn.cursor() as cur:
-            cur.execute("""
-            SELECT task_id, payload, retry_count FROM tasks
-            WHERE status = 'PENDING'
-            ORDER BY created_at
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-            """)
-            row = cur.fetchone()
-            if row is None:
-                return None
-            task_id, payload, retry_count = row
-            cur.execute(
-                    "UPDATE tasks SET status='RUNNING', updated_at=now() WHERE task_id=%s", (task_id,)
-                    )
-            return task_id, payload, retry_count
+        while True:
+            with conn, conn.cursor() as cur:
+                cur.execute("""
+                SELECT task_id, payload, retry_count, delivery_count FROM tasks
+                WHERE status = 'PENDING'
+                ORDER BY created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                task_id, payload, retry_count, delivery_count = row
+                if delivery_count + 1 > MAX_DELIVERY:
+                    cur.execute("UPDATE tasks SET status='FAILED', last_error='exceeded max delivery', updated_at=now() WHERE task_id=%s", (task_id,))
+                    print(f"[worker] task {task_id} FAILED after {delivery_count + 1} delivery.")
+                    continue
+                else:
+                    cur.execute(
+                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now() WHERE task_id=%s", (task_id,)
+                        )
+                    return task_id, payload, retry_count
     finally:
         conn.close()
 
@@ -55,7 +62,7 @@ def mark_failed_or_retry(task_id, retry_count, error_msg):
     try:
         with conn, conn.cursor() as cur:
             if retry_count + 1 >= MAX_RETRY:
-                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s, updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, task_id))
+                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s,  updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1,  task_id))
                 print(f"[worker] task {task_id} FAILED after {retry_count + 1} attempts.")
             else:
                 cur.execute("UPDATE tasks SET status='PENDING', last_error=%s, retry_count=%s, updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, task_id))
@@ -79,7 +86,7 @@ def reaper():
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
-            cur.execute("UPDATE tasks SET lease_expires_at=NULL, status='PENDING', delivery_count=delivery_count+1 WHERE (lease_expires_at is NULL OR now() > lease_expires_at) AND status='RUNNING';")
+            cur.execute("UPDATE tasks SET lease_expires_at=NULL, status='PENDING' WHERE (lease_expires_at is NULL OR now() > lease_expires_at) AND status='RUNNING';")
             print(f"[reaper] reclaimed {cur.rowcount} tasks.")
     finally:
         conn.close()

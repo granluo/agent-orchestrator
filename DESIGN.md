@@ -249,6 +249,20 @@ Observed in practice: tasks recovered after a worker kill end up with
 execution failure — the two numbers tell two different stories about the same
 task.
 
+**Redelivery cap.** `delivery_count` is incremented once per dispatch, at claim
+time, when a task transitions PENDING -> RUNNING. The reaper does **not** touch
+it — reclaiming a stale task only returns it to PENDING; the subsequent re-claim
+is what counts as the next delivery. This keeps `delivery_count` equal to "times
+handed to a worker," with no double-counting between claim and reaper.
+
+The cap is enforced as admission control at claim: if `delivery_count + 1 >
+MAX_DELIVERY`, the task is marked `FAILED` (with `last_error = 'exceeded max
+delivery'`) instead of being executed. This bounds poison tasks — a payload that
+crashes its worker every time would otherwise be reclaimed and re-dispatched
+forever, since a crash never increments `retry_count` and so never trips the
+retry limit. The cap is checked at the moment of dispatch because claim is the
+single gateway from PENDING to RUNNING, making it the natural admission point.
+
 ---
 
 ## 9. Thread coordination details (heartbeat)
@@ -289,14 +303,6 @@ inside `execute_task` and cannot also renew on a timer.
 
 These are known and deliberately out of scope for the current iteration. They
 are recorded here rather than hidden.
-
-- **`delivery_count` has no cap yet.** The reaper currently always returns a
-  stale task to `PENDING`. A "poison task" that crashes its worker on every
-  attempt would be reclaimed forever, and because a crash does not increment
-  `retry_count`, the retry limit does not catch it. The intended fix:
-  past a `MAX_DELIVERY` threshold, the reaper marks the task `FAILED` instead of
-  re-queuing it. (Counter and increment already exist; the threshold branch does
-  not.)
 
 - **Reaper is single-process.** Recovery stops if the reaper is down. The
   reclaim is already concurrency-safe (single atomic UPDATE), so running
