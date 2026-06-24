@@ -1,10 +1,13 @@
 import psycopg2
 import json
+import os
+
+password=os.environ.get("DB_PASSWORD", "devpass")
 
 def get_conn():
     return psycopg2.connect(
         host="localhost", port=5432,
-        dbname="orchestrator", user="postgres", password="devpass"
+        dbname="orchestrator", user="postgres", password=password
     )
 
 def submit_task(payload: dict, idempotency_key: str | None) -> int:
