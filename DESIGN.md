@@ -83,7 +83,7 @@ task is recovered and re-run.
 Workers claim work with:
 
 ```sql
-SELECT task_id, payload, retry_count FROM tasks
+SELECT task_id, payload, retry_count, delivery_count FROM tasks
 WHERE status = 'PENDING'
 ORDER BY created_at
 FOR UPDATE SKIP LOCKED
@@ -206,14 +206,18 @@ worker.**
 ### 7.3 Reaper
 
 A background loop periodically reclaims tasks that are `RUNNING` but whose lease
-has expired (or was never set):
+has expired (or was never set), returning them to `PENDING`:
 
 ```sql
 UPDATE tasks
-SET status = 'PENDING', lease_expires_at = NULL, delivery_count = delivery_count + 1
+SET status = 'PENDING', lease_expires_at = NULL
 WHERE status = 'RUNNING'
   AND (lease_expires_at IS NULL OR lease_expires_at < now())
 ```
+
+The reaper only returns the task to the queue; it does **not** increment
+`delivery_count`. The counting happens when the task is re-claimed (see §8) — a
+reclaim is not itself a delivery, the subsequent claim is.
 
 `IS NULL` is required, not optional: a worker that crashed immediately after
 claiming (before its first heartbeat) leaves `lease_expires_at` as NULL, and
@@ -236,7 +240,7 @@ A subtle but important distinction the design insists on:
 | Counter | Incremented when | Meaning |
 | --- | --- | --- |
 | `retry_count` | `execute_task` **raises** | the task's own execution failed |
-| `delivery_count` | the **reaper reclaims** it | the task was handed out again because a worker vanished |
+| `delivery_count` | a worker **claims** the task (PENDING -> RUNNING) | the task was dispatched to a worker again |
 
 A worker *crashing* is not the same failure as a task *erroring*. The first is
 "the executor disappeared"; the second is "the work itself failed." Conflating
@@ -249,19 +253,22 @@ Observed in practice: tasks recovered after a worker kill end up with
 execution failure — the two numbers tell two different stories about the same
 task.
 
-**Redelivery cap.** `delivery_count` is incremented once per dispatch, at claim
-time, when a task transitions PENDING -> RUNNING. The reaper does **not** touch
-it — reclaiming a stale task only returns it to PENDING; the subsequent re-claim
-is what counts as the next delivery. This keeps `delivery_count` equal to "times
+**Where the increment lives.** `delivery_count` is incremented exactly once per
+dispatch, at claim time, when a task transitions PENDING -> RUNNING. The reaper
+does **not** touch it (see §7.3) — reclaiming a stale task only returns it to
+PENDING; the subsequent re-claim is what counts as the next delivery. Keeping
+the increment in exactly one place (claim) means `delivery_count` equals "times
 handed to a worker," with no double-counting between claim and reaper.
 
-The cap is enforced as admission control at claim: if `delivery_count + 1 >
-MAX_DELIVERY`, the task is marked `FAILED` (with `last_error = 'exceeded max
-delivery'`) instead of being executed. This bounds poison tasks — a payload that
-crashes its worker every time would otherwise be reclaimed and re-dispatched
-forever, since a crash never increments `retry_count` and so never trips the
-retry limit. The cap is checked at the moment of dispatch because claim is the
-single gateway from PENDING to RUNNING, making it the natural admission point.
+**Redelivery cap (poison-task protection).** The cap is enforced as admission
+control at claim: if `delivery_count + 1 > MAX_DELIVERY`, the task is marked
+`FAILED` (with `last_error = 'exceeded max delivery'`) instead of being executed.
+This bounds poison tasks — a payload that crashes its worker every time would
+otherwise be reclaimed and re-dispatched forever, since a crash never increments
+`retry_count` and so never trips the retry limit. The check lives at claim
+because claim is the single gateway from PENDING to RUNNING, making it the
+natural admission point — the reaper stays purely a recovery mechanism, and the
+"give up" decision stays with the component about to execute the task.
 
 ---
 
@@ -343,6 +350,9 @@ curl -X POST localhost:8000/tasks \
   -d '{"prompt": "hello"}'
 ```
 
+The DB password is read from the `DB_PASSWORD` environment variable, defaulting
+to `devpass` for local development.
+
 **Crash-recovery demo:** submit a long task, `kill -9` the worker mid-execution,
 observe the task stuck `RUNNING`, then watch the reaper return it to `PENDING`
-(with `delivery_count` incremented) and a fresh worker complete it.
+and a fresh worker re-claim it (incrementing `delivery_count`) and complete it.
