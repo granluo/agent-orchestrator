@@ -28,7 +28,7 @@ def claim_one_task():
                     continue
                 else:
                     cur.execute(
-                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now() WHERE task_id=%s", (task_id,)
+                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now(), started_at=now() WHERE task_id=%s", (task_id,)
                         )
                     return task_id, payload, retry_count
     finally:
@@ -47,7 +47,7 @@ def mark_succeeded(task_id, result):
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
-            cur.execute("UPDATE tasks SET status='SUCCEEDED', result=%s, updated_at=now() WHERE task_id=%s",
+            cur.execute("UPDATE tasks SET status='SUCCEEDED', result=%s, updated_at=now(), duration_seconds = EXTRACT(EPOCH FROM (now() - started_at)) WHERE task_id=%s",
                         (json.dumps(result), task_id)
                         )
     except Exception as e:

@@ -54,15 +54,17 @@ def compute_metrics() -> dict:
         with conn, conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
             by_status = dict(cur.fetchall())
-            cur.execute("SELECT AVG(retry_count), COUNT(*) FILTER (WHERE delivery_count>1) FROM tasks")
+            cur.execute("SELECT AVG(retry_count), COUNT(*) FILTER (WHERE delivery_count>1),AVG(duration_seconds) FROM tasks ")
             row = cur.fetchone()
             avg_retry = 0.0
             if row[0] is not None:
                 avg_retry = float(round(row[0], 2))
             reclaimed_count = row[1]
+            avg_duration_seconds = row[2]
             metrics['by_status'] = by_status
             metrics['avg_retry'] = avg_retry
             metrics['reclaimed_count'] = reclaimed_count
+            metrics['avg_duration_seconds'] = avg_duration_seconds
             return metrics
 
     finally:
