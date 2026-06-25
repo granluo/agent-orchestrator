@@ -47,3 +47,26 @@ def get_status(task_id: int) -> str | None:
     finally:
         conn.close()
 
+def compute_metrics() -> dict:
+    conn = get_conn()
+    metrics = {}
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
+            by_status = dict(cur.fetchall())
+            cur.execute("SELECT AVG(retry_count), COUNT(*) FILTER (WHERE delivery_count>1) FROM tasks")
+            row = cur.fetchone()
+            avg_retry = 0.0
+            if row[0] is not None:
+                avg_retry = float(round(row[0], 2))
+            reclaimed_count = row[1]
+            metrics['by_status'] = by_status
+            metrics['avg_retry'] = avg_retry
+            metrics['reclaimed_count'] = reclaimed_count
+            return metrics
+
+    finally:
+        conn.close()
+
+if __name__ == '__main__':
+    print(compute_metrics())
