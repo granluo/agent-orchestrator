@@ -25,3 +25,7 @@ def get_task(task_id: int):
             return {"task_id": task_id, "status": row[0], "result": row[1]}
     finally:
         conn.close()
+
+@app.get("/metrics")
+def metrics():
+    return db.compute_metrics()
