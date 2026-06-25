@@ -304,9 +304,96 @@ inside `execute_task` and cannot also renew on a timer.
 - **Daemon thread.** The heartbeat is a daemon thread so a dying main process
   is never blocked from exiting by an outstanding heartbeat.
 
+## 10. Observability: metrics and per-task duration
+
+The system exposes a snapshot of its own health, computed by scanning the
+`tasks` table, plus a per-task execution-duration measurement that feeds the
+aggregate.
+
+### 10.1 Aggregate metrics (`compute_metrics`)
+
+A single function scans the table and returns a snapshot dict:
+
+- **Status distribution** — `SELECT status, COUNT(*) FROM tasks GROUP BY status`,
+  collected into a dict (`{'SUCCEEDED': 24, 'FAILED': 2, ...}`). Answers "where
+  are tasks right now."
+- **Average retry count** — `AVG(retry_count)` over the whole table.
+- **Reclaimed count** — how many tasks have been redelivered at least once,
+  i.e. recovered by the reaper at some point (`delivery_count > 1`).
+- **Average execution duration** — `AVG(duration_seconds)` over completed tasks.
+
+The numeric aggregates are computed in a single query using `FILTER`:
+
+```sql
+SELECT AVG(retry_count),
+       COUNT(*) FILTER (WHERE delivery_count > 1),
+       AVG(duration_seconds)
+FROM tasks
+```
+
+**Why `FILTER` rather than `WHERE`:** the three aggregates need different row
+scopes — the averages are over the whole table, but the reclaimed count is over
+a subset (`delivery_count > 1`). A top-level `WHERE` would constrain *all* the
+aggregates to that subset. `FILTER` attaches a predicate to one aggregate only,
+so a single scan produces aggregates with independent scopes instead of issuing
+multiple queries.
+
+**NULL handling:** `AVG` returns `NULL` on an empty (or all-NULL) input rather
+than `0`. `avg_duration_seconds` is therefore left as `None` (serialized to JSON
+`null`) when no completed task has a recorded duration yet — an honest "no data"
+rather than a fabricated number. Postgres's `AVG` also silently skips NULL rows,
+so tasks that never completed (no `duration_seconds`) don't distort the average.
+
+### 10.2 HTTP exposure (`GET /metrics`)
+
+The metric snapshot is exposed over HTTP as a thin endpoint:
+
+```python
+@app.get("/metrics")
+def metrics():
+    return db.compute_metrics()
+```
+
+The endpoint is deliberately a pure pass-through: all the query logic lives in
+`db.compute_metrics`, and the route just forwards the result, which FastAPI
+serializes to JSON. This keeps the HTTP layer (`main.py`) free of SQL, mirroring
+the separation maintained elsewhere. The path is `/metrics` — a collection-level
+endpoint kept distinct from `/tasks/{task_id}` so it isn't parsed as a task id.
+
+### 10.3 Per-task execution duration
+
+To measure how long a task actually executes, the system records two columns:
+
+- `started_at` — written at claim time, when the task transitions
+  PENDING -> RUNNING.
+- `duration_seconds` — written at completion, as
+  `EXTRACT(EPOCH FROM (now() - started_at))`, which converts the
+  `now() - started_at` interval into a float number of seconds.
+
+**Why `started_at` is written on every claim:** a task that is retried or
+reclaimed and then re-claimed gets a fresh `started_at`, so `duration_seconds`
+measures the most recent execution rather than including time the task spent
+waiting in the queue between attempts.
+
+**Why duration is stored, not derived (denormalization on purpose):** the
+duration could in principle be recomputed from timestamps (`updated_at -
+started_at`) at query time, but `updated_at` is a general-purpose column touched
+by many transitions. If a future change ever mutates a completed task (e.g.
+allowing a SUCCEEDED task to be re-run), every historical duration derived from
+`updated_at` would silently become wrong. Snapshotting the duration at the
+moment of completion makes it an immutable historical fact — "this run took this
+long" — that no later state change can corrupt. This is the classic justification
+for denormalization: when a derived value depends on a column whose semantics may
+shift, capture the result at the event rather than recomputing it from a moving
+source.
+
+The duration is computed in SQL (`now() - started_at`) rather than in Python, so
+the measurement uses a single clock (the database's) and avoids skew between the
+application host and the DB.
+
 ---
 
-## 10. Known limitations (intentional, deferred)
+## 11. Known limitations (intentional, deferred)
 
 These are known and deliberately out of scope for the current iteration. They
 are recorded here rather than hidden.
@@ -330,7 +417,7 @@ are recorded here rather than hidden.
 
 ---
 
-## 11. How to run
+## 12. How to run
 
 ```bash
 # Postgres (Docker)
