@@ -12,7 +12,7 @@ def claim_one_task():
         while True:
             with conn, conn.cursor() as cur:
                 cur.execute("""
-                SELECT task_id, payload, retry_count, delivery_count FROM tasks
+                SELECT task_id, payload, retry_count, delivery_count, route FROM tasks
                 WHERE status = 'PENDING'
                 ORDER BY created_at
                 FOR UPDATE SKIP LOCKED
@@ -21,26 +21,46 @@ def claim_one_task():
                 row = cur.fetchone()
                 if row is None:
                     return None
-                task_id, payload, retry_count, delivery_count = row
+                task_id, payload, retry_count, delivery_count, route = row
+                if route is None:
+                    route = 'local'
                 if delivery_count + 1 > MAX_DELIVERY:
                     cur.execute("UPDATE tasks SET status='FAILED', last_error='exceeded max delivery', updated_at=now() WHERE task_id=%s", (task_id,))
                     print(f"[worker] task {task_id} FAILED after {delivery_count + 1} delivery.")
                     continue
                 else:
                     cur.execute(
-                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now(), started_at=now() WHERE task_id=%s", (task_id,)
+                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now() WHERE task_id=%s", (task_id,)
                         )
-                    return task_id, payload, retry_count
+                    return task_id, payload, retry_count, route
     finally:
         conn.close()
 
 # execute task
-def execute_task(task_id, payload):
-    print(f"[worker] running task {task_id}: {payload}")
-    time.sleep(25)
-    print(f"executed")
+def execute_task(task_id, payload, route):
+    conn = db.get_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE tasks SET started_at=now(), updated_at=now(), route=%s WHERE task_id=%s", (route, task_id))
+    finally:
+        conn.close()
+    print(f"[worker] running task {task_id} through {route} : {payload}")
+    if route == 'cloud':
+        return execute_cloud(task_id, payload)
+    else:
+        return execute_local(task_id, payload)
+
+
+def execute_local(task_id, payload):
+    time.sleep(8)
     if random.random() < 0.3 :
-        raise RuntimeError("simulated transient failure")
+        raise RuntimeError("simulated local transient failure")
+    return {"echo": payload.get("prompt", "")}
+
+def execute_cloud(task_id, payload):
+    time.sleep(2)
+    if random.random() < 0.3 :
+        raise RuntimeError("simulated cloud transient failure")
     return {"echo": payload.get("prompt", "")}
 
 def mark_succeeded(task_id, result):
@@ -75,9 +95,9 @@ def heartbeat(task_id, stop_event):
     try:
         while not stop_event.is_set():
             with conn, conn.cursor() as cur:
-                print(f"task {task_id} extends lease")
+                print(f"[heartbeat] task {task_id} extends lease")
                 cur.execute("UPDATE tasks SET lease_expires_at = now() + interval '30 seconds' WHERE task_id = %s", (task_id,))
-                stop_event.wait(10)
+            stop_event.wait(10)
 
     finally:
         conn.close()
@@ -99,7 +119,7 @@ def run_loop():
         if claim is None:
             time.sleep(2)
             continue
-        task_id, payload, retry_count = claim
+        task_id, payload, retry_count, route = claim
         if retry_count > 0:
             backoff = 2 ** retry_count
             print(f"[worker] backoff {backoff}s before retry")
@@ -109,7 +129,7 @@ def run_loop():
         hb_thread.daemon = True
         hb_thread.start()
         try:
-            result = execute_task(task_id, payload)
+            result = execute_task(task_id, payload, route)
             mark_succeeded(task_id, result)
             print(f"[worker] task {task_id} done")
         except Exception as e:
