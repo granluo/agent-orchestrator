@@ -3,6 +3,7 @@ import db, time, json, random, threading
 MAX_RETRY=3
 MAX_DELIVERY=3
 THRESHOLD=100
+PENDING_THRESHOLD=5
 
 # get task
 
@@ -35,9 +36,12 @@ def claim_one_task():
     finally:
         conn.close()
 
-def decide_route(payload):
+def decide_route(payload, metrics):
     prompt = payload.get("prompt", "")
     if len(prompt) > THRESHOLD:
+        return 'cloud'
+    pending = metrics.get("by_status", {}).get("PENDING", 0)
+    if pending > PENDING_THRESHOLD:
         return 'cloud'
     return 'local'
 # execute task
@@ -127,7 +131,9 @@ def run_loop():
             continue
         task_id, payload, retry_count, route = claim
         if route is None:
-            route = decide_route(payload)
+            # TODO: get metrics for each task claim is heavy, might cache it 
+            metrics = db.compute_metrics()
+            route = decide_route(payload, metrics)
         if retry_count > 0:
             backoff = 2 ** retry_count
             print(f"[worker] backoff {backoff}s before retry")
