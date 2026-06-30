@@ -2,6 +2,7 @@ import db, time, json, random, threading
 
 MAX_RETRY=3
 MAX_DELIVERY=3
+THRESHOLD=100
 
 # get task
 
@@ -22,8 +23,6 @@ def claim_one_task():
                 if row is None:
                     return None
                 task_id, payload, retry_count, delivery_count, route = row
-                if route is None:
-                    route = 'local'
                 if delivery_count + 1 > MAX_DELIVERY:
                     cur.execute("UPDATE tasks SET status='FAILED', last_error='exceeded max delivery', updated_at=now() WHERE task_id=%s", (task_id,))
                     print(f"[worker] task {task_id} FAILED after {delivery_count + 1} delivery.")
@@ -36,6 +35,11 @@ def claim_one_task():
     finally:
         conn.close()
 
+def decide_route(payload):
+    prompt = payload.get("prompt", "")
+    if len(prompt) > THRESHOLD:
+        return 'cloud'
+    return 'local'
 # execute task
 def execute_task(task_id, payload, route):
     conn = db.get_conn()
@@ -52,12 +56,14 @@ def execute_task(task_id, payload, route):
 
 
 def execute_local(task_id, payload):
+    print(f"[worker] task {task_id} is running locally.")
     time.sleep(8)
     if random.random() < 0.3 :
         raise RuntimeError("simulated local transient failure")
     return {"echo": payload.get("prompt", "")}
 
 def execute_cloud(task_id, payload):
+    print(f"[worker] task {task_id} is running on the cloud.")
     time.sleep(2)
     if random.random() < 0.3 :
         raise RuntimeError("simulated cloud transient failure")
@@ -120,6 +126,8 @@ def run_loop():
             time.sleep(2)
             continue
         task_id, payload, retry_count, route = claim
+        if route is None:
+            route = decide_route(payload)
         if retry_count > 0:
             backoff = 2 ** retry_count
             print(f"[worker] backoff {backoff}s before retry")
