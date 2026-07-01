@@ -5,12 +5,13 @@ CREATE TABLE tasks (
     payload          JSONB NOT NULL,                    -- task input (e.g. prompt)
     result           JSONB,                             -- task output, set on success
     retry_count      INT NOT NULL DEFAULT 0,            -- times execution raised and was retried
-    delivery_count   INT NOT NULL DEFAULT 0,            -- times handed to a worker; caps poison tasks
+    delivery_count   INT NOT NULL DEFAULT 0,            -- times handed to a worker; caps poison/crash-looped tasks
     last_error       TEXT,                              -- last failure reason
     lease_expires_at TIMESTAMPTZ,                       -- lease deadline; reaper reclaims if past or NULL
     started_at       TIMESTAMPTZ,                       -- set when execution begins (excludes queue/backoff)
-    duration_seconds DOUBLE PRECISION,                  -- execution time, recorded on success
+    duration_seconds DOUBLE PRECISION,                  -- execution time in seconds; a measurement, float is fine
     route            TEXT,                              -- backend that ran the task: 'local' or 'cloud'
+    cost             NUMERIC,                           -- cost charged for the task; NUMERIC (not float) for money precision
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
