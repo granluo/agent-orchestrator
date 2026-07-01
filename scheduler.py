@@ -4,6 +4,8 @@ MAX_RETRY=3
 MAX_DELIVERY=3
 THRESHOLD=100
 PENDING_THRESHOLD=5
+LOCAL_COST=0.001
+CLOUD_COST=0.01
 
 # get task
 
@@ -44,6 +46,11 @@ def decide_route(payload, metrics):
     if pending > PENDING_THRESHOLD:
         return 'cloud'
     return 'local'
+class ExecutionError(Exception):
+    def __init__(self, message, cost):
+        super().__init__(message)
+        self.cost =cost
+
 # execute task
 def execute_task(task_id, payload, route):
     conn = db.get_conn()
@@ -63,22 +70,22 @@ def execute_local(task_id, payload):
     print(f"[worker] task {task_id} is running locally.")
     time.sleep(8)
     if random.random() < 0.3 :
-        raise RuntimeError("simulated local transient failure")
-    return {"echo": payload.get("prompt", "")}
+        raise ExecutionError("simulated local transient failure", LOCAL_COST)
+    return ({"echo": payload.get("prompt", "")}, LOCAL_COST)
 
 def execute_cloud(task_id, payload):
     print(f"[worker] task {task_id} is running on the cloud.")
     time.sleep(2)
     if random.random() < 0.3 :
-        raise RuntimeError("simulated cloud transient failure")
-    return {"echo": payload.get("prompt", "")}
+        raise ExecutionError("simulated cloud transient failure", CLOUD_COST)
+    return ({"echo": payload.get("prompt", "")},  CLOUD_COST)
 
-def mark_succeeded(task_id, result):
+def mark_succeeded(task_id, result, cost):
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
-            cur.execute("UPDATE tasks SET status='SUCCEEDED', result=%s, updated_at=now(), duration_seconds = EXTRACT(EPOCH FROM (now() - started_at)) WHERE task_id=%s",
-                        (json.dumps(result), task_id)
+            cur.execute("UPDATE tasks SET status='SUCCEEDED', result=%s, cost=%s, updated_at=now(), duration_seconds = EXTRACT(EPOCH FROM (now() - started_at)) WHERE task_id=%s",
+                        (json.dumps(result), cost, task_id)
                         )
     except Exception as e:
         print(f"Failed to mark succeeded, {e}")
@@ -87,15 +94,15 @@ def mark_succeeded(task_id, result):
         conn.close()
 
 
-def mark_failed_or_retry(task_id, retry_count, error_msg):
+def mark_failed_or_retry(task_id, retry_count, cost, error_msg):
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
             if retry_count + 1 >= MAX_RETRY:
-                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s,  updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1,  task_id))
+                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s, cost=cost+%s,  updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, cost, task_id))
                 print(f"[worker] task {task_id} FAILED after {retry_count + 1} attempts.")
             else:
-                cur.execute("UPDATE tasks SET status='PENDING', last_error=%s, retry_count=%s, updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, task_id))
+                cur.execute("UPDATE tasks SET status='PENDING', last_error=%s, retry_count=%s, cost=cost+%s, updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, cost, task_id))
                 print(f"[worker] task {task_id} will retry (attempt {retry_count + 1} ).")
     finally:
         conn.close()
@@ -143,11 +150,11 @@ def run_loop():
         hb_thread.daemon = True
         hb_thread.start()
         try:
-            result = execute_task(task_id, payload, route)
-            mark_succeeded(task_id, result)
+            result, cost = execute_task(task_id, payload, route)
+            mark_succeeded(task_id, result, cost)
             print(f"[worker] task {task_id} done")
         except Exception as e:
-            mark_failed_or_retry(task_id, retry_count, str(e))
+            mark_failed_or_retry(task_id, retry_count, e.cost, str(e))
         finally:
             stop_event.set()
             hb_thread.join()
