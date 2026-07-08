@@ -1,5 +1,6 @@
 # Distributed AI Agent Orchestration Platform — Design
 
+
 A durable, multi-worker task orchestration system built on PostgreSQL. Tasks are
 submitted via an HTTP API, persisted in Postgres, and executed by a pool of
 workers that claim work concurrently. The system is designed to survive process
@@ -391,9 +392,126 @@ The duration is computed in SQL (`now() - started_at`) rather than in Python, so
 the measurement uses a single clock (the database's) and avoids skew between the
 application host and the DB.
 
+
+## 11. Dynamic routing: local vs cloud backends
+
+Tasks can execute on one of two backends with opposite trade-offs:
+
+- **local** — a small model on limited local hardware: cheap (electricity),
+  slow, weaker capability. Mocked as `time.sleep(8)`.
+- **cloud** — a large model on specialized inference hardware: fast, more
+  capable, billed per use. Mocked as `time.sleep(2)`.
+
+The routing question is a cost / latency / capability trade-off: not every task
+justifies the expensive backend, and not every task can be handled by the cheap
+one. The strategy is cost-first — default to local to save money, and spill to
+cloud when the task demands it or the system is overloaded.
+
+The `route` column records which backend actually ran each task, written at
+execution start alongside `started_at`.
+
+### 11.1 Decision function: two signals, OR'd
+
+`decide_route(payload, metrics)` is a pure function — it reads its inputs and
+returns `'local'` or `'cloud'`, with no database access — so it can be unit
+tested and reasoned about in isolation. It combines two signals:
+
+1. **Content signal**: a long prompt (`len(prompt) > THRESHOLD`) routes to
+   cloud. Prompt length is a cheap proxy for task difficulty — long inputs are
+   more likely to need the stronger model.
+2. **Load signal**: a PENDING backlog above `PENDING_THRESHOLD` routes to
+   cloud. A growing queue means local consumption is falling behind
+   submission; spilling new work to the faster backend drains the backlog.
+
+Either signal alone is sufficient (logical OR): hard tasks go to cloud even
+when the system is idle; easy tasks go to cloud when the system is swamped.
+
+```
+route decision (only when route is unset):
+    prompt longer than THRESHOLD?        -> cloud
+    PENDING backlog over PENDING_THRESHOLD? -> cloud
+    otherwise                            -> local
+```
+
+### 11.2 Explicit over implicit: user-specified routes are respected
+
+`decide_route` only fills in a route when none was specified
+(`if route is None`). If a task already carries a route — e.g. a client that
+knows its task needs the large model — the system honors that choice rather
+than overriding it with automatic logic. The decision function is a smart
+default, not a mandate.
+
+(The HTTP API does not yet expose a route field on submission; the branch
+exists in the worker so adding the entry point is a small change.)
+
+### 11.3 The load signal closes the loop with observability
+
+The load signal is where routing and observability connect: the same
+`compute_metrics()` snapshot that powers `GET /metrics` is fed into
+`decide_route`. Metrics are not just a dashboard for humans — they are an input
+to the system's own decisions.
+
+This creates a self-regulating negative feedback loop:
+
+```
+backlog grows past threshold
+    -> new tasks spill to cloud (fast, 2s)
+    -> backlog drains quickly
+    -> backlog falls below threshold
+    -> new tasks return to local (cheap)
+```
+
+The system automatically balances "save money" (local, when idle) against "buy
+speed" (cloud, under load) with no operator intervention. In the logs this is
+visible as a burst of submissions routing to cloud, followed by tasks reverting
+to local once the queue drains.
+
+Metrics are currently recomputed for every routing decision — a full-table scan
+per task. This is fine at this scale and keeps the decision maximally fresh,
+but at higher volume the snapshot should be cached or sampled (flagged as a
+TODO in the code and listed under known limitations).
+
+### 11.4 Cost tracking
+
+Each backend has a fixed per-task cost (`LOCAL_COST = 0.001`,
+`CLOUD_COST = 0.01` — cloud is 10x). The executing backend returns
+`(result, cost)`, and `mark_succeeded` records the cost in the same UPDATE as
+the duration — both are facts snapshotted at completion.
+
+Storing cost (rather than deriving it from `route` at query time) follows the
+same reasoning as storing `duration_seconds`: the recorded value is an
+immutable historical fact. If per-route prices change later, past tasks keep
+the cost they were actually charged, instead of history being silently
+rewritten by a price constant.
+
+The `cost` column is `NUMERIC`, not a float: money must be exact, and floating
+point accumulates rounding error. (`duration_seconds` stays `DOUBLE PRECISION`
+— a measurement tolerates float imprecision; a charge does not.)
+
+`compute_metrics` aggregates `SUM(cost)` grouped by route (excluding tasks that
+never ran, whose route is NULL):
+
+```json
+"cost_by_route": {"local": 0.012, "cloud": 0.07}
+```
+
+This makes the routing strategy's economics quantifiable: how much work stayed
+on the cheap backend, and what the spill to cloud actually cost.
+
+**MVP simplifications, deliberately accepted:**
+
+- Only successful tasks are charged. In reality a failed execution still burns
+  compute; charging failures requires the cost to survive the exception path
+  (e.g. a custom exception carrying the cost), deferred to keep the MVP small.
+- Cost is a per-route constant. Real billing is usage-based (tokens or
+  seconds), which is why the cost is computed inside the executing backend and
+  bubbled up with the result — when per-token pricing arrives, the change is
+  confined to the backend functions; the plumbing already carries a computed
+  value.
+
 ---
 
-## 11. Known limitations (intentional, deferred)
+## 12. Known limitations (intentional, deferred)
 
 These are known and deliberately out of scope for the current iteration. They
 are recorded here rather than hidden.
@@ -415,9 +533,17 @@ are recorded here rather than hidden.
 - **Polling latency.** Workers poll every 2 seconds when idle. Fine for this
   scale; a `LISTEN/NOTIFY` push model would cut idle latency if needed.
 
+- **Metrics recomputed per routing decision.** Every automatic routing decision
+  runs `compute_metrics()`, a full-table scan. Should be cached or sampled at
+  scale.
+- **Failed tasks are not charged.** Cost is only recorded on success; failed
+  executions consume compute but report zero cost, understating true spend.
+- **Static thresholds.** `THRESHOLD` (prompt length) and `PENDING_THRESHOLD`
+  (backlog) are hardcoded constants, not adaptive or configurable at runtime.
+
 ---
 
-## 12. How to run
+## 13. How to run
 
 ```bash
 # Postgres (Docker)
