@@ -1,4 +1,6 @@
-# agent-orchestrator
+# Agent Orchestrator
+
+![Architecture](docs/architecture.png)
 
 A durable, multi-worker task orchestration platform built on PostgreSQL. Tasks
 are submitted over HTTP, persisted in Postgres, and executed by a pool of
