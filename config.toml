@@ -1,0 +1,20 @@
+[retry]
+max_retry = 3
+max_delivery = 3
+
+[routing]
+prompt_threshold = 100
+pending_threshold = 5
+
+[models]
+local = "llama3.2:latest"
+cloud = "qwen3:14b"
+
+[cost]
+# Strings, not numbers: parsed with Decimal() to keep money exact.
+local_per_token = "0.00001"
+cloud_per_token = "0.0001"
+
+[ollama]
+url = "http://localhost:11434"
+timeout_seconds = 60

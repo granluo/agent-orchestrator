@@ -1,17 +1,5 @@
-import db, time, json, threading, requests
+import db, time, json, threading, requests, config
 from decimal import Decimal
-
-MAX_RETRY=3
-MAX_DELIVERY=3
-THRESHOLD=100
-PENDING_THRESHOLD=5
-LOCAL_COST_PER_TOKEN=Decimal("0.00001")
-CLOUD_COST_PER_TOKEN=Decimal("0.0001")
-
-LOCAL_MODEL="llama3.2:latest"
-CLOUD_MODEL="qwen3:14b"
-
-# get task
 
 def claim_one_task():
 
@@ -30,7 +18,7 @@ def claim_one_task():
                 if row is None:
                     return None
                 task_id, payload, retry_count, delivery_count, route = row
-                if delivery_count + 1 > MAX_DELIVERY:
+                if delivery_count + 1 > config.MAX_DELIVERY:
                     cur.execute("UPDATE tasks SET status='FAILED', last_error='exceeded max delivery', updated_at=now() WHERE task_id=%s", (task_id,))
                     print(f"[worker] task {task_id} FAILED after {delivery_count + 1} delivery.")
                     continue
@@ -44,10 +32,10 @@ def claim_one_task():
 
 def decide_route(payload, metrics):
     prompt = payload.get("prompt", "")
-    if len(prompt) > THRESHOLD:
+    if len(prompt) > config.THRESHOLD:
         return 'cloud'
     pending = metrics.get("by_status", {}).get("PENDING", 0)
-    if pending > PENDING_THRESHOLD:
+    if pending > config.PENDING_THRESHOLD:
         return 'cloud'
     return 'local'
 
@@ -69,36 +57,36 @@ def execute_task(task_id, payload, route):
 def execute_local(task_id, payload):
     print(f"[worker] task {task_id} is running locally.")
     resp = requests.post(
-            "http://localhost:11434/api/generate",
+            config.OLLAMA_URL+"/api/generate",
             json={
-                "model": LOCAL_MODEL,
+                "model": config.LOCAL_MODEL,
                 "prompt": payload.get("prompt", ""),
                 "stream": False,
                 },
-            timeout=60,
+            timeout=config.OLLAMA_TIMEOUT,
             )
     resp.raise_for_status()
     data = resp.json()
     text = data.get("response", "")
     tokens = data.get("eval_count", 0)
-    return ({"text": text}, tokens * LOCAL_COST_PER_TOKEN)
+    return ({"text": text}, tokens * config.LOCAL_COST_PER_TOKEN)
 
 def execute_cloud(task_id, payload):
     print(f"[worker] task {task_id} is running on the cloud.")
     resp = requests.post(
-            "http://localhost:11434/api/generate",
+            config.OLLAMA_URL+"/api/generate",
             json={
-                "model": CLOUD_MODEL,
+                "model": config.CLOUD_MODEL,
                 "prompt": payload.get("prompt", ""),
                 "stream": False,
                 },
-            timeout=60,
+            timeout=config.OLLAMA_TIMEOUT,
             )
     resp.raise_for_status()
     data = resp.json()
     text = data.get("response", "")
     tokens = data.get("eval_count", 0)
-    return ({"text": text}, tokens * CLOUD_COST_PER_TOKEN)
+    return ({"text": text}, tokens * config.CLOUD_COST_PER_TOKEN)
 
 def mark_succeeded(task_id, result, cost):
     conn = db.get_conn()
@@ -118,7 +106,7 @@ def mark_failed_or_retry(task_id, retry_count,  error_msg):
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
-            if retry_count + 1 >= MAX_RETRY:
+            if retry_count + 1 >= config.MAX_RETRY:
                 cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s,   updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1,  task_id))
                 print(f"[worker] task {task_id} FAILED after {retry_count + 1} attempts.")
             else:
