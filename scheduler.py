@@ -1,11 +1,15 @@
-import db, time, json, random, threading
+import db, time, json, threading, requests
+from decimal import Decimal
 
 MAX_RETRY=3
 MAX_DELIVERY=3
 THRESHOLD=100
 PENDING_THRESHOLD=5
-LOCAL_COST=0.001
-CLOUD_COST=0.01
+LOCAL_COST_PER_TOKEN=Decimal("0.00001")
+CLOUD_COST_PER_TOKEN=Decimal("0.0001")
+
+LOCAL_MODEL="llama3.2:latest"
+CLOUD_MODEL="qwen3:14b"
 
 # get task
 
@@ -32,8 +36,8 @@ def claim_one_task():
                     continue
                 else:
                     cur.execute(
-                        "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now() WHERE task_id=%s", (task_id,)
-                        )
+                            "UPDATE tasks SET status='RUNNING', delivery_count = delivery_count + 1, updated_at=now() WHERE task_id=%s", (task_id,)
+                            )
                     return task_id, payload, retry_count, route
     finally:
         conn.close()
@@ -46,10 +50,6 @@ def decide_route(payload, metrics):
     if pending > PENDING_THRESHOLD:
         return 'cloud'
     return 'local'
-class ExecutionError(Exception):
-    def __init__(self, message, cost):
-        super().__init__(message)
-        self.cost =cost
 
 # execute task
 def execute_task(task_id, payload, route):
@@ -68,17 +68,37 @@ def execute_task(task_id, payload, route):
 
 def execute_local(task_id, payload):
     print(f"[worker] task {task_id} is running locally.")
-    time.sleep(8)
-    if random.random() < 0.3 :
-        raise ExecutionError("simulated local transient failure", LOCAL_COST)
-    return ({"echo": payload.get("prompt", "")}, LOCAL_COST)
+    resp = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": LOCAL_MODEL,
+                "prompt": payload.get("prompt", ""),
+                "stream": False,
+                },
+            timeout=60,
+            )
+    resp.raise_for_status()
+    data = resp.json()
+    text = data.get("response", "")
+    tokens = data.get("eval_count", 0)
+    return ({"text": text}, tokens * LOCAL_COST_PER_TOKEN)
 
 def execute_cloud(task_id, payload):
     print(f"[worker] task {task_id} is running on the cloud.")
-    time.sleep(2)
-    if random.random() < 0.3 :
-        raise ExecutionError("simulated cloud transient failure", CLOUD_COST)
-    return ({"echo": payload.get("prompt", "")},  CLOUD_COST)
+    resp = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": CLOUD_MODEL,
+                "prompt": payload.get("prompt", ""),
+                "stream": False,
+                },
+            timeout=60,
+            )
+    resp.raise_for_status()
+    data = resp.json()
+    text = data.get("response", "")
+    tokens = data.get("eval_count", 0)
+    return ({"text": text}, tokens * CLOUD_COST_PER_TOKEN)
 
 def mark_succeeded(task_id, result, cost):
     conn = db.get_conn()
@@ -94,15 +114,15 @@ def mark_succeeded(task_id, result, cost):
         conn.close()
 
 
-def mark_failed_or_retry(task_id, retry_count, cost, error_msg):
+def mark_failed_or_retry(task_id, retry_count,  error_msg):
     conn = db.get_conn()
     try:
         with conn, conn.cursor() as cur:
             if retry_count + 1 >= MAX_RETRY:
-                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s, cost=cost+%s,  updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, cost, task_id))
+                cur.execute("UPDATE tasks SET status='FAILED', last_error=%s, retry_count=%s,   updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1,  task_id))
                 print(f"[worker] task {task_id} FAILED after {retry_count + 1} attempts.")
             else:
-                cur.execute("UPDATE tasks SET status='PENDING', last_error=%s, retry_count=%s, cost=cost+%s, updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1, cost, task_id))
+                cur.execute("UPDATE tasks SET status='PENDING', last_error=%s, retry_count=%s,  updated_at=now() WHERE task_id=%s", (error_msg, retry_count+1,  task_id))
                 print(f"[worker] task {task_id} will retry (attempt {retry_count + 1} ).")
     finally:
         conn.close()
@@ -154,7 +174,7 @@ def run_loop():
             mark_succeeded(task_id, result, cost)
             print(f"[worker] task {task_id} done")
         except Exception as e:
-            mark_failed_or_retry(task_id, retry_count, e.cost, str(e))
+            mark_failed_or_retry(task_id, retry_count, str(e))
         finally:
             stop_event.set()
             hb_thread.join()
