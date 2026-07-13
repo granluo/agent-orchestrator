@@ -237,6 +237,13 @@ Example shape:
 
 ## Crash-Recovery Demo
 
+```bash
+./demo.sh
+```
+The script submits a long task, kills the worker mid-execution (SIGKILL), waits for the lease to expire (~35s), starts a fresh worker, and shows the final state: `delivery_count=2, retry_count=0` — the task was delivered twice but never failed. A worker crash is redelivery, not task failure.
+
+### What it does under the hood
+
 1. Submit a task that takes long enough to run through the worker.
 2. Kill the worker process while the task is `RUNNING`.
 3. Watch the heartbeat stop renewing `lease_expires_at`.
