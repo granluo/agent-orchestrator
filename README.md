@@ -152,6 +152,14 @@ Check metrics:
 curl http://localhost:8000/metrics
 ```
 
+## Tests
+
+```bash
+python -m pytest
+```
+
+Unit tests cover `decide_route` — both routing signals, threshold boundaries, and defensive handling of missing keys.
+
 ## API
 
 ### `POST /tasks`
