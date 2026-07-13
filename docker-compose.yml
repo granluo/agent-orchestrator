@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: orchestrator-pg
+    environment:
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: orchestrator
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

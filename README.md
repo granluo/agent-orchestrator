@@ -100,25 +100,12 @@ Routing rules:
 ## Quick Start
 
 
-Start Postgres:
+Start Postgres (schema is created automatically on first run):
 
 ```bash
-docker run --name orchestrator-pg \
-  -e POSTGRES_PASSWORD=devpass \
-  -e POSTGRES_DB=orchestrator \
-  -p 5432:5432 \
-  -d postgres
+docker compose up -d
 ```
 
-Create the schema:
-
-```bash
-psql "postgresql://postgres:devpass@localhost:5432/orchestrator" -f schema.sql
-```
-or, without a local psql client:
-```bash
-docker exec -i orchestrator-pg psql -U postgres -d orchestrator < schema.sql
-```
 Make sure Ollama is running and the configured models are available:
 
 ```bash

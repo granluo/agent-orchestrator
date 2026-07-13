@@ -552,7 +552,7 @@ price constant.
 that never ran, whose route is NULL):
 
 ```json
-"cost_by_route": {"local": 0.00009, "cloud": 0.0638}
+"cost_by_route": {"local": "0.00009", "cloud": "0.0638"}
 ```
 
 This makes the routing strategy's economics quantifiable: how much work stayed
