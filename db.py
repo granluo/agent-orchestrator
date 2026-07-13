@@ -55,7 +55,7 @@ def compute_metrics() -> dict:
             cur.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
             by_status = dict(cur.fetchall())
             cur.execute("SELECT route, SUM(cost) FROM tasks WHERE route IS NOT NULL GROUP BY route")
-            cost_by_route = dict(cur.fetchall())
+            cost_by_route = {route: str(total) for route, total in cur.fetchall()}
             cur.execute("SELECT AVG(retry_count), COUNT(*) FILTER (WHERE delivery_count>1),AVG(duration_seconds) FROM tasks ")
             row = cur.fetchone()
             avg_retry = 0.0
