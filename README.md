@@ -58,7 +58,7 @@ bounded counters. No Redis, no message broker, no separate lock service.
 
 ## Configuration
 
-Database credentials are configured in code for local development:
+Connection parameters are hardcoded for local development; the password comes from the DB_PASSWORD env var (defaults to devpass) — secrets stay out of code and config files.
 
 - Host: `localhost`
 - Port: `5432`
@@ -99,6 +99,7 @@ Routing rules:
 
 ## Quick Start
 
+
 Start Postgres:
 
 ```bash
@@ -114,7 +115,10 @@ Create the schema:
 ```bash
 psql "postgresql://postgres:devpass@localhost:5432/orchestrator" -f schema.sql
 ```
-
+or, without a local psql client:
+```bash
+docker exec -i orchestrator-pg psql -U postgres -d orchestrator < schema.sql
+```
 Make sure Ollama is running and the configured models are available:
 
 ```bash
@@ -125,7 +129,7 @@ ollama pull qwen3:14b
 Install Python dependencies in your preferred environment:
 
 ```bash
-pip install fastapi uvicorn psycopg2-binary requests
+pip install -r requirements.txt
 ```
 
 Start the API:
@@ -230,8 +234,8 @@ Example shape:
   "reclaimed_count": 1,
   "avg_duration_seconds": 3.41,
   "cost_by_route": {
-    "local": "0.00120",
-    "cloud": "0.03400"
+    "local": "0.15818000",
+    "cloud": "0.03400000"
   }
 }
 ```

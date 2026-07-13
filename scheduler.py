@@ -1,5 +1,4 @@
 import db, time, json, threading, requests, config
-from decimal import Decimal
 
 def claim_one_task():
 
